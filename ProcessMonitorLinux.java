@@ -2,56 +2,83 @@ import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.io.*;
+import java.lang.management.*;
 import java.nio.file.*;
 import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.*;
+import com.sun.management.OperatingSystemMXBean;
 
 public class ProcessMonitorLinux extends JFrame {
 
-    // Configurare
+    // Configurare Process Monitor
     private int checkIntervalSeconds = 60;
     private int maxRuntimeMinutes = 30;
     private int warningMinutes = 25;
-    private static final String LOG_FILE = System.getProperty("user.home") + "/.process_monitor.log";
-    private static final String CONFIG_FILE = System.getProperty("user.home") + "/.process_monitor.conf";
-    private static final String AUTOSTART_DIR = System.getProperty("user.home") + "/.config/autostart";
-    private static final String AUTOSTART_FILE = AUTOSTART_DIR + "/process-monitor.desktop";
 
-    // Cuvinte cheie
+    // Configurare System Monitor
+    private int systemCheckIntervalSeconds = 5;
+
+    // Paths
+    private static final String LOG_FILE = System.getProperty("user.home") + "/.system_monitor.log";
+    private static final String CONFIG_FILE = System.getProperty("user.home") + "/.system_monitor.conf";
+    private static final String AUTOSTART_DIR = System.getProperty("user.home") + "/.config/autostart";
+    private static final String AUTOSTART_FILE = AUTOSTART_DIR + "/system-monitor.desktop";
+
+    // Cuvinte cheie pentru procese
     private Set<String> keywords = new HashSet<>(Arrays.asList(
             "chrome", "firefox", "brave", "opera", "chromium",
             "steam", "minecraft", "wine", "lutris",
             "discord", "spotify", "telegram", "slack"
     ));
 
-    // Tracking
+    // Tracking procese
     private final Map<Integer, Long> processStartTimes = new ConcurrentHashMap<>();
     private final Map<Integer, Boolean> warningShown = new ConcurrentHashMap<>();
 
-    // UI Components
-    private JTable processTable;
-    private DefaultTableModel tableModel;
-    private JTextArea logArea;
-    private JButton startButton, stopButton, configButton;
-    private JLabel statusLabel;
-    private ScheduledExecutorService scheduler;
-    private boolean isMonitoring = false;
+    // System monitoring
+    private OperatingSystemMXBean osBean;
+    private Runtime runtime;
 
-    public ProcessMonitorLinux() {
-        setTitle("Process Monitor - Linux");
-        setSize(900, 600);
+    // UI Components - Process Monitor
+    private JTable processTable;
+    private DefaultTableModel processTableModel;
+    private JTextArea logArea;
+    private JButton startProcessButton, stopProcessButton, configButton;
+    private JLabel processStatusLabel;
+    private ScheduledExecutorService processScheduler;
+    private boolean isProcessMonitoring = false;
+
+    // UI Components - System Monitor
+    private JLabel cpuLabel, ramLabel, totalRamLabel, freeRamLabel, usedRamLabel;
+    private JProgressBar cpuProgressBar, ramProgressBar;
+    private JButton startSystemButton, stopSystemButton;
+    private JLabel systemStatusLabel;
+    private ScheduledExecutorService systemScheduler;
+    private boolean isSystemMonitoring = false;
+    private JTable systemHistoryTable;
+    private DefaultTableModel systemHistoryModel;
+    private final int MAX_HISTORY_ROWS = 100;
+
+    public SystemMonitorLinux() {
+        setTitle("System Monitor - Linux (Process & Resources)");
+        setSize(1000, 700);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
 
+        initSystemBeans();
         loadConfig();
         initUI();
         checkPermissions();
     }
 
+    private void initSystemBeans() {
+        osBean = (OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
+        runtime = Runtime.getRuntime();
+    }
+
     private void checkPermissions() {
-        // Verifică dacă poate accesa /proc
         File procDir = new File("/proc");
         if (!procDir.canRead()) {
             JOptionPane.showMessageDialog(this,
@@ -64,58 +91,175 @@ public class ProcessMonitorLinux extends JFrame {
     private void initUI() {
         setLayout(new BorderLayout(10, 10));
 
-        // Top Panel - Controls
-        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        topPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 5, 10));
+        // Main tabbed pane
+        JTabbedPane tabbedPane = new JTabbedPane();
 
-        startButton = new JButton("Start Monitoring");
-        stopButton = new JButton("Stop");
-        configButton = new JButton("Settings");
-        JButton logButton = new JButton("View Full Log");
+        // Tab 1: System Resources Monitor
+        tabbedPane.addTab("System Resources", createSystemMonitorPanel());
+
+        // Tab 2: Process Monitor
+        tabbedPane.addTab("Process Monitor", createProcessMonitorPanel());
+
+        // Tab 3: Settings & Logs
+        tabbedPane.addTab("Logs & Settings", createLogsPanel());
+
+        add(tabbedPane, BorderLayout.CENTER);
+
+        // Bottom status bar
+        JPanel statusBar = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        statusBar.setBorder(BorderFactory.createEtchedBorder());
+        JLabel infoLabel = new JLabel("System Monitor v1.0 | Log: " + LOG_FILE);
+        statusBar.add(infoLabel);
+        add(statusBar, BorderLayout.SOUTH);
+    }
+
+    private JPanel createSystemMonitorPanel() {
+        JPanel panel = new JPanel(new BorderLayout(10, 10));
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+
+        // Top control panel
+        JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        startSystemButton = new JButton("Start System Monitoring");
+        stopSystemButton = new JButton("Stop");
         JButton autostartButton = new JButton("Add to Autostart");
 
-        startButton.setBackground(new Color(34, 139, 34));
-        startButton.setForeground(Color.WHITE);
-        stopButton.setBackground(new Color(178, 34, 34));
-        stopButton.setForeground(Color.WHITE);
-        stopButton.setEnabled(false);
+        startSystemButton.setBackground(new Color(34, 139, 34));
+        startSystemButton.setForeground(Color.WHITE);
+        stopSystemButton.setBackground(new Color(178, 34, 34));
+        stopSystemButton.setForeground(Color.WHITE);
+        stopSystemButton.setEnabled(false);
 
-        startButton.addActionListener(e -> startMonitoring());
-        stopButton.addActionListener(e -> stopMonitoring());
-        configButton.addActionListener(e -> showConfigDialog());
-        logButton.addActionListener(e -> openLogFile());
+        startSystemButton.addActionListener(e -> startSystemMonitoring());
+        stopSystemButton.addActionListener(e -> stopSystemMonitoring());
         autostartButton.addActionListener(e -> addToAutostart());
 
-        topPanel.add(startButton);
-        topPanel.add(stopButton);
-        topPanel.add(configButton);
-        topPanel.add(logButton);
-        topPanel.add(autostartButton);
+        controlPanel.add(startSystemButton);
+        controlPanel.add(stopSystemButton);
+        controlPanel.add(autostartButton);
 
-        statusLabel = new JLabel("Status: Stopped");
-        statusLabel.setFont(new Font("Arial", Font.BOLD, 12));
-        topPanel.add(Box.createHorizontalStrut(20));
-        topPanel.add(statusLabel);
+        systemStatusLabel = new JLabel("Status: Stopped");
+        systemStatusLabel.setFont(new Font("Sans", Font.BOLD, 12));
+        controlPanel.add(Box.createHorizontalStrut(20));
+        controlPanel.add(systemStatusLabel);
 
-        add(topPanel, BorderLayout.NORTH);
+        panel.add(controlPanel, BorderLayout.NORTH);
 
-        // Center - SplitPane
-        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
-        splitPane.setResizeWeight(0.6);
+        // Center - Current stats and history
+        JPanel centerPanel = new JPanel(new BorderLayout(10, 10));
 
-        // Process Table
-        String[] columns = {"Process Name", "PID", "User", "Runtime (min)", "Status"};
-        tableModel = new DefaultTableModel(columns, 0) {
+        // Current stats panel
+        JPanel statsPanel = new JPanel(new GridLayout(2, 1, 10, 10));
+        statsPanel.setBorder(BorderFactory.createTitledBorder("Current System Status"));
+
+        // CPU Panel
+        JPanel cpuPanel = new JPanel(new BorderLayout(10, 5));
+        cpuPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        cpuLabel = new JLabel("CPU Load: 0.00%");
+        cpuLabel.setFont(new Font("Monospace", Font.BOLD, 14));
+        cpuProgressBar = new JProgressBar(0, 100);
+        cpuProgressBar.setStringPainted(true);
+        cpuProgressBar.setPreferredSize(new Dimension(400, 30));
+        cpuPanel.add(cpuLabel, BorderLayout.NORTH);
+        cpuPanel.add(cpuProgressBar, BorderLayout.CENTER);
+
+        // RAM Panel
+        JPanel ramPanel = new JPanel(new BorderLayout(10, 5));
+        ramPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+
+        JPanel ramLabelsPanel = new JPanel(new GridLayout(4, 1, 5, 5));
+        ramLabel = new JLabel("RAM Usage: 0.00%");
+        ramLabel.setFont(new Font("Monospace", Font.BOLD, 14));
+        totalRamLabel = new JLabel("Total RAM: 0 MB");
+        freeRamLabel = new JLabel("Free RAM: 0 MB");
+        usedRamLabel = new JLabel("Used RAM: 0 MB");
+
+        ramLabelsPanel.add(ramLabel);
+        ramLabelsPanel.add(totalRamLabel);
+        ramLabelsPanel.add(usedRamLabel);
+        ramLabelsPanel.add(freeRamLabel);
+
+        ramProgressBar = new JProgressBar(0, 100);
+        ramProgressBar.setStringPainted(true);
+        ramProgressBar.setPreferredSize(new Dimension(400, 30));
+
+        ramPanel.add(ramLabelsPanel, BorderLayout.NORTH);
+        ramPanel.add(ramProgressBar, BorderLayout.CENTER);
+
+        statsPanel.add(cpuPanel);
+        statsPanel.add(ramPanel);
+
+        centerPanel.add(statsPanel, BorderLayout.NORTH);
+
+        // History table
+        String[] historyColumns = {"Time", "CPU Load (%)", "Total RAM (MB)", "Used RAM (MB)", "Free RAM (MB)"};
+        systemHistoryModel = new DefaultTableModel(historyColumns, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
                 return false;
             }
         };
-        processTable = new JTable(tableModel);
-        processTable.setFont(new Font("Monospace", Font.PLAIN, 12));
-        processTable.getTableHeader().setFont(new Font("Sans", Font.BOLD, 12));
+        systemHistoryTable = new JTable(systemHistoryModel);
+        systemHistoryTable.setFont(new Font("Monospace", Font.PLAIN, 11));
+        JScrollPane historyScroll = new JScrollPane(systemHistoryTable);
+        historyScroll.setBorder(BorderFactory.createTitledBorder("History (Last " + MAX_HISTORY_ROWS + " readings)"));
 
-        // Context menu pentru procese
+        centerPanel.add(historyScroll, BorderLayout.CENTER);
+
+        panel.add(centerPanel, BorderLayout.CENTER);
+
+        // Bottom info
+        JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JLabel intervalLabel = new JLabel("Update Interval: " + systemCheckIntervalSeconds + " seconds");
+        bottomPanel.add(intervalLabel);
+        panel.add(bottomPanel, BorderLayout.SOUTH);
+
+        return panel;
+    }
+
+    private JPanel createProcessMonitorPanel() {
+        JPanel panel = new JPanel(new BorderLayout(10, 10));
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+
+        // Top Panel - Controls
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+
+        startProcessButton = new JButton("Start Process Monitoring");
+        stopProcessButton = new JButton("Stop");
+        configButton = new JButton("Settings");
+
+        startProcessButton.setBackground(new Color(34, 139, 34));
+        startProcessButton.setForeground(Color.WHITE);
+        stopProcessButton.setBackground(new Color(178, 34, 34));
+        stopProcessButton.setForeground(Color.WHITE);
+        stopProcessButton.setEnabled(false);
+
+        startProcessButton.addActionListener(e -> startProcessMonitoring());
+        stopProcessButton.addActionListener(e -> stopProcessMonitoring());
+        configButton.addActionListener(e -> showConfigDialog());
+
+        topPanel.add(startProcessButton);
+        topPanel.add(stopProcessButton);
+        topPanel.add(configButton);
+
+        processStatusLabel = new JLabel("Status: Stopped");
+        processStatusLabel.setFont(new Font("Sans", Font.BOLD, 12));
+        topPanel.add(Box.createHorizontalStrut(20));
+        topPanel.add(processStatusLabel);
+
+        panel.add(topPanel, BorderLayout.NORTH);
+
+        // Center - Process Table
+        String[] columns = {"Process Name", "PID", "User", "Runtime (min)", "Status"};
+        processTableModel = new DefaultTableModel(columns, 0) {
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return false;
+            }
+        };
+        processTable = new JTable(processTableModel);
+        processTable.setFont(new Font("Monospace", Font.PLAIN, 12));
+
+        // Context menu
         JPopupMenu contextMenu = new JPopupMenu();
         JMenuItem killItem = new JMenuItem("Kill Process (SIGTERM)");
         JMenuItem forceKillItem = new JMenuItem("Force Kill (SIGKILL)");
@@ -135,6 +279,37 @@ public class ProcessMonitorLinux extends JFrame {
         JScrollPane tableScroll = new JScrollPane(processTable);
         tableScroll.setBorder(BorderFactory.createTitledBorder("Tracked Processes"));
 
+        panel.add(tableScroll, BorderLayout.CENTER);
+
+        // Bottom Panel - Info
+        JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JLabel infoLabel = new JLabel(
+                "Max Runtime: " + maxRuntimeMinutes + " min | " +
+                        "Keywords: " + keywords.size() + " | " +
+                        "Check Interval: " + checkIntervalSeconds + "s"
+        );
+        bottomPanel.add(infoLabel);
+        panel.add(bottomPanel, BorderLayout.SOUTH);
+
+        return panel;
+    }
+
+    private JPanel createLogsPanel() {
+        JPanel panel = new JPanel(new BorderLayout(10, 10));
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+
+        // Top controls
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JButton openLogButton = new JButton("Open Log File");
+        JButton clearLogButton = new JButton("Clear UI Log");
+
+        openLogButton.addActionListener(e -> openLogFile());
+        clearLogButton.addActionListener(e -> logArea.setText(""));
+
+        topPanel.add(openLogButton);
+        topPanel.add(clearLogButton);
+        panel.add(topPanel, BorderLayout.NORTH);
+
         // Log Area
         logArea = new JTextArea();
         logArea.setEditable(false);
@@ -142,23 +317,129 @@ public class ProcessMonitorLinux extends JFrame {
         JScrollPane logScroll = new JScrollPane(logArea);
         logScroll.setBorder(BorderFactory.createTitledBorder("Activity Log"));
 
-        splitPane.setTopComponent(tableScroll);
-        splitPane.setBottomComponent(logScroll);
+        panel.add(logScroll, BorderLayout.CENTER);
 
-        add(splitPane, BorderLayout.CENTER);
-
-        // Bottom Panel - Info
-        JPanel bottomPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        bottomPanel.setBorder(BorderFactory.createEmptyBorder(5, 10, 10, 10));
-        JLabel infoLabel = new JLabel(
-                "Max Runtime: " + maxRuntimeMinutes + " min | " +
-                        "Keywords: " + keywords.size() + " | " +
-                        "Check Interval: " + checkIntervalSeconds + "s"
-        );
-        infoLabel.setFont(new Font("Sans", Font.PLAIN, 11));
-        bottomPanel.add(infoLabel);
-        add(bottomPanel, BorderLayout.SOUTH);
+        return panel;
     }
+
+    // ===== SYSTEM MONITORING METHODS =====
+
+    private void startSystemMonitoring() {
+        if (isSystemMonitoring) return;
+
+        isSystemMonitoring = true;
+        startSystemButton.setEnabled(false);
+        stopSystemButton.setEnabled(true);
+        systemStatusLabel.setText("Status: Monitoring Active");
+        systemStatusLabel.setForeground(new Color(34, 139, 34));
+
+        logToUI("=== System Monitoring Started ===");
+        log("System monitoring started");
+
+        systemScheduler = Executors.newScheduledThreadPool(1);
+        systemScheduler.scheduleAtFixedRate(() -> {
+            try {
+                updateSystemStats();
+            } catch (Exception e) {
+                logToUI("System monitoring error: " + e.getMessage());
+            }
+        }, 0, systemCheckIntervalSeconds, TimeUnit.SECONDS);
+    }
+
+    private void stopSystemMonitoring() {
+        if (!isSystemMonitoring) return;
+
+        isSystemMonitoring = false;
+        if (systemScheduler != null) {
+            systemScheduler.shutdown();
+        }
+
+        startSystemButton.setEnabled(true);
+        stopSystemButton.setEnabled(false);
+        systemStatusLabel.setText("Status: Stopped");
+        systemStatusLabel.setForeground(new Color(178, 34, 34));
+
+        logToUI("=== System Monitoring Stopped ===");
+        log("System monitoring stopped");
+    }
+
+    private void updateSystemStats() {
+        // Get CPU load
+        double cpuLoad = osBean.getSystemCpuLoad() * 100;
+        if (cpuLoad < 0) {
+            // Fallback pentru unele sisteme
+            cpuLoad = osBean.getProcessCpuLoad() * 100;
+        }
+
+        // Get RAM info
+        long totalMemory = osBean.getTotalPhysicalMemorySize();
+        long freeMemory = osBean.getFreePhysicalMemorySize();
+        long usedMemory = totalMemory - freeMemory;
+        double ramUsagePercent = ((double) usedMemory / totalMemory) * 100;
+
+        // Convert to MB
+        long totalMemoryMB = totalMemory / (1024 * 1024);
+        long freeMemoryMB = freeMemory / (1024 * 1024);
+        long usedMemoryMB = usedMemory / (1024 * 1024);
+
+        // Update UI
+        final double finalCpuLoad = cpuLoad;
+        final double finalRamUsage = ramUsagePercent;
+
+        SwingUtilities.invokeLater(() -> {
+            // Update labels
+            cpuLabel.setText(String.format("CPU Load: %.2f%%", finalCpuLoad));
+            ramLabel.setText(String.format("RAM Usage: %.2f%%", finalRamUsage));
+            totalRamLabel.setText(String.format("Total RAM: %d MB", totalMemoryMB));
+            usedRamLabel.setText(String.format("Used RAM: %d MB", usedMemoryMB));
+            freeRamLabel.setText(String.format("Free RAM: %d MB", freeMemoryMB));
+
+            // Update progress bars
+            cpuProgressBar.setValue((int) finalCpuLoad);
+            ramProgressBar.setValue((int) finalRamUsage);
+
+            // Set colors based on usage
+            if (finalCpuLoad > 80) {
+                cpuProgressBar.setForeground(Color.RED);
+            } else if (finalCpuLoad > 60) {
+                cpuProgressBar.setForeground(Color.ORANGE);
+            } else {
+                cpuProgressBar.setForeground(new Color(34, 139, 34));
+            }
+
+            if (finalRamUsage > 80) {
+                ramProgressBar.setForeground(Color.RED);
+            } else if (finalRamUsage > 60) {
+                ramProgressBar.setForeground(Color.ORANGE);
+            } else {
+                ramProgressBar.setForeground(new Color(34, 139, 34));
+            }
+
+            // Add to history table
+            String timestamp = new SimpleDateFormat("HH:mm:ss").format(new Date());
+            systemHistoryModel.insertRow(0, new Object[]{
+                    timestamp,
+                    String.format("%.2f", finalCpuLoad),
+                    totalMemoryMB,
+                    usedMemoryMB,
+                    freeMemoryMB
+            });
+
+            // Limit history rows
+            while (systemHistoryModel.getRowCount() > MAX_HISTORY_ROWS) {
+                systemHistoryModel.removeRow(systemHistoryModel.getRowCount() - 1);
+            }
+        });
+
+        // Log to file
+        String logMessage = String.format(
+                "CPU: %.2f%% | RAM: %.2f%% (Used: %d MB, Free: %d MB, Total: %d MB)",
+                finalCpuLoad, finalRamUsage, usedMemoryMB, freeMemoryMB, totalMemoryMB
+        );
+        log(logMessage);
+    }
+
+    // ===== PROCESS MONITORING METHODS =====
 
     private void killSelectedProcess(boolean forceKill) {
         int selectedRow = processTable.getSelectedRow();
@@ -167,8 +448,8 @@ public class ProcessMonitorLinux extends JFrame {
             return;
         }
 
-        int pid = (int) tableModel.getValueAt(selectedRow, 1);
-        String processName = (String) tableModel.getValueAt(selectedRow, 0);
+        int pid = (int) processTableModel.getValueAt(selectedRow, 1);
+        String processName = (String) processTableModel.getValueAt(selectedRow, 0);
 
         try {
             String signal = forceKill ? "SIGKILL" : "SIGTERM";
@@ -186,51 +467,51 @@ public class ProcessMonitorLinux extends JFrame {
         int selectedRow = processTable.getSelectedRow();
         if (selectedRow == -1) return;
 
-        int pid = (int) tableModel.getValueAt(selectedRow, 1);
+        int pid = (int) processTableModel.getValueAt(selectedRow, 1);
         processStartTimes.remove(pid);
         warningShown.remove(pid);
         logToUI("Ignoring PID " + pid + " for this session");
     }
 
-    private void startMonitoring() {
-        if (isMonitoring) return;
+    private void startProcessMonitoring() {
+        if (isProcessMonitoring) return;
 
-        isMonitoring = true;
-        startButton.setEnabled(false);
-        stopButton.setEnabled(true);
-        statusLabel.setText("Status: Monitoring Active");
-        statusLabel.setForeground(new Color(34, 139, 34));
+        isProcessMonitoring = true;
+        startProcessButton.setEnabled(false);
+        stopProcessButton.setEnabled(true);
+        processStatusLabel.setText("Status: Monitoring Active");
+        processStatusLabel.setForeground(new Color(34, 139, 34));
 
-        logToUI("=== Monitoring Started ===");
-        log("Monitoring started");
+        logToUI("=== Process Monitoring Started ===");
+        log("Process monitoring started");
 
-        scheduler = Executors.newScheduledThreadPool(1);
-        scheduler.scheduleAtFixedRate(() -> {
+        processScheduler = Executors.newScheduledThreadPool(1);
+        processScheduler.scheduleAtFixedRate(() -> {
             try {
                 checkAndTerminateProcesses();
             } catch (Exception e) {
-                logToUI("Error: " + e.getMessage());
+                logToUI("Process monitoring error: " + e.getMessage());
             }
         }, 0, checkIntervalSeconds, TimeUnit.SECONDS);
     }
 
-    private void stopMonitoring() {
-        if (!isMonitoring) return;
+    private void stopProcessMonitoring() {
+        if (!isProcessMonitoring) return;
 
-        isMonitoring = false;
-        if (scheduler != null) {
-            scheduler.shutdown();
+        isProcessMonitoring = false;
+        if (processScheduler != null) {
+            processScheduler.shutdown();
         }
 
-        startButton.setEnabled(true);
-        stopButton.setEnabled(false);
-        statusLabel.setText("Status: Stopped");
-        statusLabel.setForeground(new Color(178, 34, 34));
+        startProcessButton.setEnabled(true);
+        stopProcessButton.setEnabled(false);
+        processStatusLabel.setText("Status: Stopped");
+        processStatusLabel.setForeground(new Color(178, 34, 34));
 
-        logToUI("=== Monitoring Stopped ===");
-        log("Monitoring stopped");
+        logToUI("=== Process Monitoring Stopped ===");
+        log("Process monitoring stopped");
 
-        tableModel.setRowCount(0);
+        processTableModel.setRowCount(0);
         processStartTimes.clear();
         warningShown.clear();
     }
@@ -240,8 +521,7 @@ public class ProcessMonitorLinux extends JFrame {
             List<ProcessInfo> processes = getRunningProcesses();
             long currentTime = System.currentTimeMillis();
 
-            // Update table
-            SwingUtilities.invokeLater(() -> tableModel.setRowCount(0));
+            SwingUtilities.invokeLater(() -> processTableModel.setRowCount(0));
 
             for (ProcessInfo process : processes) {
                 if (matchesKeywords(process.name)) {
@@ -258,19 +538,19 @@ public class ProcessMonitorLinux extends JFrame {
                         continue;
                     } else if (runtimeMinutes >= warningMinutes &&
                             !warningShown.getOrDefault(process.pid, false)) {
-                        status = "⚠ Warning";
+                        status = "Warning";
                         showWarningNotification(process, runtimeMinutes);
                         warningShown.put(process.pid, true);
                     } else if (runtimeMinutes >= warningMinutes) {
-                        status = "⚠ Warning Sent";
+                        status = "Warning Sent";
                     } else {
-                        status = "✓ OK";
+                        status = "OK";
                     }
 
                     int finalRuntime = (int) runtimeMinutes;
                     String finalStatus = status;
                     SwingUtilities.invokeLater(() -> {
-                        tableModel.addRow(new Object[]{
+                        processTableModel.addRow(new Object[]{
                                 process.name,
                                 process.pid,
                                 process.user,
@@ -291,7 +571,6 @@ public class ProcessMonitorLinux extends JFrame {
     private List<ProcessInfo> getRunningProcesses() throws IOException {
         List<ProcessInfo> processes = new ArrayList<>();
 
-        // Folosește ps pentru a obține procesele
         ProcessBuilder pb = new ProcessBuilder("ps", "aux");
         Process process = pb.start();
 
@@ -308,7 +587,6 @@ public class ProcessMonitorLinux extends JFrame {
                     int pid = Integer.parseInt(parts[1]);
                     String command = parts[10];
 
-                    // Extrage numele procesului din command
                     String processName = extractProcessName(command);
                     processes.add(new ProcessInfo(processName, pid, user));
                 }
@@ -319,11 +597,9 @@ public class ProcessMonitorLinux extends JFrame {
     }
 
     private String extractProcessName(String command) {
-        // Elimină path-ul și argumentele
         String[] parts = command.split("\\s+");
         String basePath = parts[0];
 
-        // Extrage doar numele fișierului
         int lastSlash = basePath.lastIndexOf('/');
         if (lastSlash != -1) {
             return basePath.substring(lastSlash + 1);
@@ -333,17 +609,13 @@ public class ProcessMonitorLinux extends JFrame {
 
     private void terminateProcess(ProcessInfo process) {
         try {
-            // Încearcă mai întâi SIGTERM (graceful)
             ProcessBuilder pb = new ProcessBuilder("kill", "-15", String.valueOf(process.pid));
             Process p = pb.start();
             p.waitFor();
 
-            // Așteaptă 2 secunde
             Thread.sleep(2000);
 
-            // Verifică dacă procesul încă rulează
             if (isProcessRunning(process.pid)) {
-                // Dacă încă rulează, folosește SIGKILL
                 pb = new ProcessBuilder("kill", "-9", String.valueOf(process.pid));
                 p = pb.start();
                 p.waitFor();
@@ -376,7 +648,7 @@ public class ProcessMonitorLinux extends JFrame {
 
     private void showWarningNotification(ProcessInfo process, long runtime) {
         int remaining = maxRuntimeMinutes - (int) runtime;
-        String msg = "⚠ Warning: " + process.name + " will close in " + remaining + " minutes";
+        String msg = "Warning: " + process.name + " will close in " + remaining + " minutes";
         logToUI(msg);
         log(msg);
 
@@ -385,7 +657,6 @@ public class ProcessMonitorLinux extends JFrame {
     }
 
     private void showNotification(String title, String message) {
-        // Încearcă notify-send (disponibil pe majoritatea distro-urilor)
         try {
             ProcessBuilder pb = new ProcessBuilder(
                     "notify-send",
@@ -396,7 +667,6 @@ public class ProcessMonitorLinux extends JFrame {
             );
             pb.start();
         } catch (Exception e) {
-            // Fallback la JOptionPane dacă notify-send nu e disponibil
             SwingUtilities.invokeLater(() -> {
                 JOptionPane.showMessageDialog(this, message, title,
                         JOptionPane.WARNING_MESSAGE);
@@ -416,9 +686,11 @@ public class ProcessMonitorLinux extends JFrame {
         warningShown.keySet().removeIf(pid -> !activePids.contains(pid));
     }
 
+    // ===== CONFIGURATION METHODS =====
+
     private void showConfigDialog() {
-        JDialog dialog = new JDialog(this, "Settings", true);
-        dialog.setSize(500, 400);
+        JDialog dialog = new JDialog(this, "Process Monitor Settings", true);
+        dialog.setSize(500, 450);
         dialog.setLocationRelativeTo(this);
         dialog.setLayout(new BorderLayout(10, 10));
 
@@ -442,15 +714,22 @@ public class ProcessMonitorLinux extends JFrame {
         gbc.gridx = 1;
         panel.add(warningSpinner, gbc);
 
-        // Check interval
+        // Process check interval
         gbc.gridx = 0; gbc.gridy = 2;
-        panel.add(new JLabel("Check Interval (seconds):"), gbc);
+        panel.add(new JLabel("Process Check Interval (seconds):"), gbc);
         JSpinner intervalSpinner = new JSpinner(new SpinnerNumberModel(checkIntervalSeconds, 10, 300, 10));
         gbc.gridx = 1;
         panel.add(intervalSpinner, gbc);
 
-        // Keywords
+        // System check interval
         gbc.gridx = 0; gbc.gridy = 3;
+        panel.add(new JLabel("System Check Interval (seconds):"), gbc);
+        JSpinner systemIntervalSpinner = new JSpinner(new SpinnerNumberModel(systemCheckIntervalSeconds, 1, 60, 1));
+        gbc.gridx = 1;
+        panel.add(systemIntervalSpinner, gbc);
+
+        // Keywords
+        gbc.gridx = 0; gbc.gridy = 4;
         panel.add(new JLabel("Keywords (comma-separated):"), gbc);
         JTextArea keywordsArea = new JTextArea(3, 20);
         keywordsArea.setText(String.join(", ", keywords));
@@ -469,6 +748,7 @@ public class ProcessMonitorLinux extends JFrame {
             maxRuntimeMinutes = (int) runtimeSpinner.getValue();
             warningMinutes = (int) warningSpinner.getValue();
             checkIntervalSeconds = (int) intervalSpinner.getValue();
+            systemCheckIntervalSeconds = (int) systemIntervalSpinner.getValue();
 
             keywords.clear();
             String[] kws = keywordsArea.getText().split(",");
@@ -495,6 +775,7 @@ public class ProcessMonitorLinux extends JFrame {
             writer.println("maxRuntime=" + maxRuntimeMinutes);
             writer.println("warningTime=" + warningMinutes);
             writer.println("checkInterval=" + checkIntervalSeconds);
+            writer.println("systemCheckInterval=" + systemCheckIntervalSeconds);
             writer.println("keywords=" + String.join(",", keywords));
             log("Configuration saved to " + CONFIG_FILE);
         } catch (IOException e) {
@@ -516,6 +797,7 @@ public class ProcessMonitorLinux extends JFrame {
             maxRuntimeMinutes = Integer.parseInt(props.getProperty("maxRuntime", "30"));
             warningMinutes = Integer.parseInt(props.getProperty("warningTime", "25"));
             checkIntervalSeconds = Integer.parseInt(props.getProperty("checkInterval", "60"));
+            systemCheckIntervalSeconds = Integer.parseInt(props.getProperty("systemCheckInterval", "5"));
 
             String kws = props.getProperty("keywords", "");
             if (!kws.isEmpty()) {
@@ -529,30 +811,27 @@ public class ProcessMonitorLinux extends JFrame {
 
     private void addToAutostart() {
         try {
-            // Creează directorul autostart dacă nu există
             File autostartDir = new File(AUTOSTART_DIR);
             if (!autostartDir.exists()) {
                 autostartDir.mkdirs();
             }
 
-            // Obține path-ul la JAR
-            String jarPath = new File(ProcessMonitorLinux.class.getProtectionDomain()
+            String jarPath = new File(SystemMonitorLinux.class.getProtectionDomain()
                     .getCodeSource().getLocation().toURI()).getPath();
 
             if (!jarPath.endsWith(".jar")) {
                 JOptionPane.showMessageDialog(this,
                         "Please compile to JAR first:\n" +
-                                "jar cfm ProcessMonitor.jar manifest.txt *.class",
+                                "jar cfm SystemMonitor.jar manifest.txt *.class",
                         "Not a JAR", JOptionPane.INFORMATION_MESSAGE);
                 return;
             }
 
-            // Creează fișierul .desktop
             String desktopContent =
                     "[Desktop Entry]\n" +
                             "Type=Application\n" +
-                            "Name=Process Monitor\n" +
-                            "Comment=Monitor and limit process runtime\n" +
+                            "Name=System Monitor\n" +
+                            "Comment=Monitor system resources and processes\n" +
                             "Exec=java -jar " + jarPath + "\n" +
                             "Icon=utilities-system-monitor\n" +
                             "Terminal=false\n" +
@@ -560,8 +839,6 @@ public class ProcessMonitorLinux extends JFrame {
                             "X-GNOME-Autostart-enabled=true\n";
 
             Files.write(Paths.get(AUTOSTART_FILE), desktopContent.getBytes());
-
-            // Face fișierul executabil
             new File(AUTOSTART_FILE).setExecutable(true);
 
             JOptionPane.showMessageDialog(this,
@@ -581,11 +858,9 @@ public class ProcessMonitorLinux extends JFrame {
 
     private void openLogFile() {
         try {
-            // Încearcă xdg-open (funcționează pe majoritatea distro-urilor)
             ProcessBuilder pb = new ProcessBuilder("xdg-open", LOG_FILE);
             pb.start();
         } catch (Exception e) {
-            // Fallback: încearcă editoare comune
             String[] editors = {"gedit", "kate", "nano", "vim", "leafpad"};
             boolean opened = false;
 
@@ -642,17 +917,15 @@ public class ProcessMonitorLinux extends JFrame {
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> {
             try {
-                // Încearcă să folosească look-and-feel-ul nativ
                 UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
             } catch (Exception e) {
-                // Fallback la default dacă sistemul nativ nu funcționează
                 try {
                     UIManager.setLookAndFeel("javax.swing.plaf.nimbus.NimbusLookAndFeel");
                 } catch (Exception ex) {
-                    // Folosește default swing look and feel
+                    // Use default
                 }
             }
-            new ProcessMonitorLinux().setVisible(true);
+            new SystemMonitorLinux().setVisible(true);
         });
     }
 }
