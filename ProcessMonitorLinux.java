@@ -61,7 +61,7 @@ public class ProcessMonitorLinux extends JFrame {
     private DefaultTableModel systemHistoryModel;
     private final int MAX_HISTORY_ROWS = 100;
 
-    public SystemMonitorLinux() {
+    public ProcessMonitorLinux() {
         setTitle("System Monitor - Linux (Process & Resources)");
         setSize(1000, 700);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
@@ -816,7 +816,7 @@ public class ProcessMonitorLinux extends JFrame {
                 autostartDir.mkdirs();
             }
 
-            String jarPath = new File(SystemMonitorLinux.class.getProtectionDomain()
+            String jarPath = new File(ProcessMonitorLinux.class.getProtectionDomain()
                     .getCodeSource().getLocation().toURI()).getPath();
 
             if (!jarPath.endsWith(".jar")) {
@@ -925,7 +925,7 @@ public class ProcessMonitorLinux extends JFrame {
                     // Use default
                 }
             }
-            new SystemMonitorLinux().setVisible(true);
+            new ProcessMonitorLinux().setVisible(true);
         });
     }
 }
